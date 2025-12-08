@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
+
 
 const app = express();
 app.use(cors());
@@ -15,22 +17,53 @@ const client = new MongoClient(uri, {
     serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
 });
 
-// Collections define করছি
-let userCollection, clubCollection, eventCollection;
+// Collections define করছি GLOBAL ভাবে
+let userCollection, clubCollection, eventCollection, paymentCollection, membershipCollection;
 
 async function run() {
-    await client.connect();
-    const db = client.db('club_sphere');
-    
-    // Collections initialize করছি
-    userCollection = db.collection('users');
-    clubCollection = db.collection('clubs');
-    eventCollection = db.collection('events'); // এখানে initialize করছি
+    try {
+        await client.connect();
+        const db = client.db('club_sphere');
 
-    console.log("Connected to MongoDB");
+        // Collections initialize করছি
+        userCollection = db.collection('users');
+        clubCollection = db.collection('clubs');
+        eventCollection = db.collection('events');
+        paymentCollection = db.collection('payments');
+        membershipCollection = db.collection('memberships');
+
+        console.log("✅ Connected to MongoDB");
+        console.log("📁 Collections initialized successfully");
+        
+        // Health check endpoint
+        app.get('/health', async (req, res) => {
+            try {
+                // Check if all collections are available
+                const collections = await db.listCollections().toArray();
+                const collectionNames = collections.map(c => c.name);
+                
+                res.status(200).json({
+                    status: 'healthy',
+                    message: 'Server is running',
+                    collections: collectionNames,
+                    isConnected: true,
+                    timestamp: new Date()
+                });
+            } catch (error) {
+                res.status(500).json({
+                    status: 'unhealthy',
+                    error: error.message
+                });
+            }
+        });
+
+    } catch (error) {
+        console.error("❌ Failed to connect to MongoDB:", error);
+        process.exit(1);
+    }
 }
 
-run().catch(console.error); // Error handling যোগ করেছি
+run().catch(console.error);
 
 /* ===========================
        USERS APIs
@@ -336,6 +369,176 @@ app.get('/clubs-stats', async (req, res) => {
     }
 });
 
+// Create Stripe Checkout Session
+app.post('/create-checkout-session', async (req, res) => {
+    try {
+        const { userEmail, amount, clubId, clubName } = req.body;
+
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [{
+                price_data: {
+                    currency: 'usd',
+                    product_data: {
+                        name: `${clubName} Membership`,
+                        description: `Join ${clubName}`,
+                    },
+                    unit_amount: amount * 100,
+                },
+                quantity: 1,
+            }],
+            mode: 'payment',
+            success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&clubId=${clubId}`,
+            cancel_url: `${process.env.FRONTEND_URL}/club/${clubId}`,
+            customer_email: userEmail,
+            metadata: { userEmail, clubId }
+        });
+
+        // Create payment record with required fields
+        const payment = {
+            userEmail,
+            amount,
+            type: 'membership',
+            clubId,
+            stripePaymentIntentId: session.payment_intent,
+            status: 'pending',
+            createdAt: new Date()
+        };
+        await paymentCollection.insertOne(payment);
+
+        res.send({ 
+            url: session.url,
+            sessionId: session.id
+        });
+
+    } catch (error) {
+        console.error('Stripe error:', error);
+        res.status(500).send({ error: 'Payment failed' });
+    }
+});
+
+// Verify Payment
+app.get('/verify-payment/:sessionId', async (req, res) => {
+    try {
+        const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+        
+        if (session.payment_status === 'paid') {
+            const payment = await paymentCollection.findOne({ 
+                stripePaymentIntentId: session.payment_intent 
+            });
+            
+            if (payment) {
+                // Update payment status
+                await paymentCollection.updateOne(
+                    { stripePaymentIntentId: session.payment_intent },
+                    { $set: { status: 'completed' } }
+                );
+
+                // Create membership with required fields
+                await membershipCollection.insertOne(
+                    { userEmail: payment.userEmail, clubId: payment.clubId },
+                    { 
+                        $set: { 
+                            userEmail: payment.userEmail,
+                            clubId: payment.clubId,
+                            status: 'active',
+                            paymentId: session.payment_intent,
+                            joinedAt: new Date()
+                        } 
+                    },
+                    { upsert: true }
+                );
+            }
+
+            res.send({ success: true, paid: true });
+        } else {
+            res.send({ success: true, paid: false });
+        }
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+});
+
+/* ===========================
+        MEMBERSHIP APIs
+===========================*/
+
+// Check membership
+app.get('/memberships/check', async (req, res) => {
+    try {
+        const { clubId, userEmail } = req.query;
+        const membership = await membershipCollection.findOne({ 
+            clubId, 
+            userEmail, 
+            status: 'active' 
+        });
+        res.send({ isMember: !!membership });
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+});
+
+// Get user's memberships
+app.get('/memberships/user/:email', async (req, res) => {
+    try {
+        const memberships = await membershipCollection.find({ 
+            userEmail: req.params.email 
+        }).toArray();
+        res.send(memberships);
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+});
+
+// Leave club (delete membership)
+app.delete('/memberships/:clubId', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        const result = await membershipCollection.deleteOne({
+            clubId: req.params.clubId,
+            userEmail
+        });
+        res.send(result);
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+});
+
+/* ===========================
+        PAYMENT APIs (Admin/Manager)
+===========================*/
+
+// Get all payments (for admin)
+app.get('/payments', async (req, res) => {
+    try {
+        const payments = await paymentCollection.find({}).sort({ createdAt: -1 }).toArray();
+        res.send(payments);
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+});
+
+// Get payment stats (revenue overview)
+app.get('/payments/stats', async (req, res) => {
+    try {
+        const totalRevenue = await paymentCollection.aggregate([
+            { $match: { status: 'completed' } },
+            { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]).toArray();
+
+        const revenueByType = await paymentCollection.aggregate([
+            { $match: { status: 'completed' } },
+            { $group: { _id: '$type', total: { $sum: '$amount' } } }
+        ]).toArray();
+
+        res.send({
+            totalRevenue: totalRevenue[0]?.total || 0,
+            revenueByType
+        });
+    } catch (error) {
+        res.status(500).send({ error: error.message });
+    }
+})
 
 /* ===========================
         EVENTS APIs - FIXED
@@ -345,11 +548,11 @@ app.get('/clubs-stats', async (req, res) => {
 app.get('/events', async (req, res) => {
     try {
         const { clubId } = req.query;
-        
+
         if (!clubId) {
             return res.status(400).send({ message: 'clubId is required' });
         }
-        
+
         const events = await eventCollection.find({ clubId }).sort({ eventDate: 1 }).toArray();
         res.send(events);
     } catch (error) {
@@ -362,24 +565,24 @@ app.get('/events', async (req, res) => {
 app.get('/events/manager', async (req, res) => {
     try {
         const { managerEmail } = req.query;
-        
+
         if (!managerEmail) {
             return res.status(400).send({ message: 'managerEmail is required' });
         }
-        
+
         // First get all clubs managed by this user
         const clubs = await clubCollection.find({ managerEmail }).toArray();
         const clubIds = clubs.map(club => club._id.toString());
-        
+
         if (clubIds.length === 0) {
             return res.send([]);
         }
-        
+
         // Get events for all these clubs
-        const events = await eventCollection.find({ 
-            clubId: { $in: clubIds } 
+        const events = await eventCollection.find({
+            clubId: { $in: clubIds }
         }).sort({ eventDate: 1 }).toArray();
-        
+
         res.send(events);
     } catch (error) {
         console.error('Error fetching manager events:', error);
@@ -391,17 +594,17 @@ app.get('/events/manager', async (req, res) => {
 app.post('/events', async (req, res) => {
     try {
         const eventData = req.body;
-        
+
         // Validation
         if (!eventData.clubId || !eventData.title || !eventData.eventDate || !eventData.location) {
             return res.status(400).send({ message: 'Missing required fields' });
         }
-        
+
         // সব events free হবে
         eventData.isPaid = false;
         eventData.eventFee = 0;
         eventData.createdAt = new Date();
-        
+
         const result = await eventCollection.insertOne(eventData);
         res.status(201).send(result);
     } catch (error) {
@@ -415,20 +618,20 @@ app.patch('/events/:id', async (req, res) => {
     try {
         const id = req.params.id;
         const updateData = req.body;
-        
+
         // Free events রাখা
         updateData.isPaid = false;
         updateData.eventFee = 0;
-        
+
         const result = await eventCollection.updateOne(
             { _id: new ObjectId(id) },
             { $set: updateData }
         );
-        
+
         if (result.matchedCount === 0) {
             return res.status(404).send({ message: 'Event not found' });
         }
-        
+
         res.send(result);
     } catch (error) {
         console.error('Error updating event:', error);
@@ -441,11 +644,11 @@ app.delete('/events/:id', async (req, res) => {
     try {
         const id = req.params.id;
         const result = await eventCollection.deleteOne({ _id: new ObjectId(id) });
-        
+
         if (result.deletedCount === 0) {
             return res.status(404).send({ message: 'Event not found' });
         }
-        
+
         res.send({ message: 'Event deleted successfully' });
     } catch (error) {
         console.error('Error deleting event:', error);
