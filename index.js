@@ -18,7 +18,7 @@ const client = new MongoClient(uri, {
 });
 
 // Collections define করছি GLOBAL ভাবে
-let userCollection, clubCollection, eventCollection, paymentCollection, membershipCollection;
+let userCollection, clubCollection, eventCollection, paymentCollection, membershipCollection, eventRegistrationCollection;
 
 async function run() {
     try {
@@ -31,6 +31,7 @@ async function run() {
         eventCollection = db.collection('events');
         paymentCollection = db.collection('payments');
         membershipCollection = db.collection('memberships');
+        eventRegistrationCollection = db.collection('eventRegistration');
 
         console.log("✅ Connected to MongoDB");
         console.log("📁 Collections initialized successfully");
@@ -348,6 +349,233 @@ app.get('/clubs/search/:keyword', async (req, res) => {
     }
 });
 
+
+
+// 1. Get all members of a specific club (for club manager)
+app.get('/clubs/:clubId/members', async (req, res) => {
+    try {
+        const { clubId } = req.params;
+        const { status } = req.query;
+
+        // First verify the club exists
+        const club = await clubCollection.findOne({ 
+            _id: new ObjectId(clubId) 
+        });
+
+        if (!club) {
+            return res.status(404).json({
+                success: false,
+                message: 'Club not found'
+            });
+        }
+
+        // Build query for memberships
+        let query = { clubId: clubId };
+        if (status) {
+            query.status = status;
+        }
+
+        // Get all memberships for this club
+        const memberships = await membershipCollection.find(query).toArray();
+
+        // Get user details for each member
+        const membersWithDetails = await Promise.all(
+            memberships.map(async (membership) => {
+                const user = await userCollection.findOne({ 
+                    email: membership.userEmail 
+                }, {
+                    projection: { 
+                        displayName: 1, 
+                        email: 1, 
+                        photoURL: 1 
+                    }
+                });
+
+                return {
+                    ...membership,
+                    userDetails: user || {
+                        displayName: 'Unknown User',
+                        email: membership.userEmail,
+                        photoURL: null
+                    }
+                };
+            })
+        );
+
+        res.json({
+            success: true,
+            club: {
+                _id: club._id,
+                clubName: club.clubName,
+                totalMembers: membersWithDetails.length
+            },
+            members: membersWithDetails,
+            count: membersWithDetails.length
+        });
+
+    } catch (error) {
+        console.error('Error fetching club members:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch club members'
+        });
+    }
+});
+
+// 2. Update member status (for club manager)
+app.patch('/clubs/:clubId/members/:memberId/status', async (req, res) => {
+    try {
+        const { clubId, memberId } = req.params;
+        const { status } = req.body;
+
+        // Valid statuses
+        const validStatuses = ['active', 'inactive', 'expired', 'suspended'];
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid status. Must be: active, inactive, expired, or suspended'
+            });
+        }
+
+        // Find the membership
+        const membership = await membershipCollection.findOne({
+            _id: new ObjectId(memberId),
+            clubId: clubId
+        });
+
+        if (!membership) {
+            return res.status(404).json({
+                success: false,
+                message: 'Member not found in this club'
+            });
+        }
+
+        // Update the status
+        const result = await membershipCollection.updateOne(
+            { _id: new ObjectId(memberId) },
+            { 
+                $set: { 
+                    status: status,
+                    updatedAt: new Date()
+                } 
+            }
+        );
+
+        if (result.modifiedCount === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Failed to update member status'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: `Member status updated to ${status}`,
+            updatedStatus: status
+        });
+
+    } catch (error) {
+        console.error('Error updating member status:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update member status'
+        });
+    }
+});
+
+// 3. Remove member from club (for club manager)
+app.delete('/clubs/:clubId/members/:memberId', async (req, res) => {
+    try {
+        const { clubId, memberId } = req.params;
+
+        // Find the membership
+        const membership = await membershipCollection.findOne({
+            _id: new ObjectId(memberId),
+            clubId: clubId
+        });
+
+        if (!membership) {
+            return res.status(404).json({
+                success: false,
+                message: 'Member not found in this club'
+            });
+        }
+
+        // Delete the membership
+        const result = await membershipCollection.deleteOne({
+            _id: new ObjectId(memberId)
+        });
+
+        if (result.deletedCount === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Failed to remove member'
+            });
+        }
+
+        // Update club members count
+        await clubCollection.updateOne(
+            { _id: new ObjectId(clubId) },
+            { 
+                $inc: { totalMembers: -1 },
+                $pull: { 
+                    members: { 
+                        userEmail: membership.userEmail 
+                    } 
+                },
+                $set: { updatedAt: new Date() }
+            }
+        );
+
+        res.json({
+            success: true,
+            message: 'Member removed from club successfully'
+        });
+
+    } catch (error) {
+        console.error('Error removing member:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to remove member'
+        });
+    }
+});
+
+// 4. Get membership statistics for a club (Optional)
+app.get('/clubs/:clubId/members-stats', async (req, res) => {
+    try {
+        const { clubId } = req.params;
+
+        const stats = await membershipCollection.aggregate([
+            { $match: { clubId: clubId } },
+            { $group: {
+                _id: '$status',
+                count: { $sum: 1 }
+            }},
+            { $project: {
+                status: '$_id',
+                count: 1,
+                _id: 0
+            }}
+        ]).toArray();
+
+        const totalMembers = stats.reduce((sum, item) => sum + item.count, 0);
+
+        res.json({
+            success: true,
+            stats: stats,
+            totalMembers: totalMembers
+        });
+
+    } catch (error) {
+        console.error('Error fetching member stats:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch member statistics'
+        });
+    }
+});
+
 // Stats
 app.get('/clubs-stats', async (req, res) => {
     try {
@@ -605,35 +833,6 @@ app.get('/events', async (req, res) => {
     }
 });
 
-
-// Get single event by ID - ADD THIS
-app.get('/events/:id', async (req, res) => {
-    try {
-        const event = await eventCollection.findOne({
-            _id: new ObjectId(req.params.id)
-        });
-
-        if (!event) {
-            return res.status(404).json({
-                success: false,
-                message: 'Event not found'
-            });
-        }
-
-        res.json({
-            success: true,
-            event: event
-        });
-    } catch (error) {
-        console.error('Error fetching event:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to fetch event',
-            message: error.message
-        });
-    }
-});
-
 // Get all events for AllEventsPage - ADD THIS
 app.get('/events/all', async (req, res) => {
     try {
@@ -686,6 +885,34 @@ app.get('/events/manager', async (req, res) => {
     } catch (error) {
         console.error('Error fetching manager events:', error);
         res.status(500).send({ error: 'Failed to fetch events' });
+    }
+});
+
+// Get single event by ID - ADD THIS
+app.get('/events/:id', async (req, res) => {
+    try {
+        const event = await eventCollection.findOne({
+            _id: new ObjectId(req.params.id)
+        });
+
+        if (!event) {
+            return res.status(404).json({
+                success: false,
+                message: 'Event not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            event: event
+        });
+    } catch (error) {
+        console.error('Error fetching event:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch event',
+            message: error.message
+        });
     }
 });
 
@@ -753,6 +980,191 @@ app.delete('/events/:id', async (req, res) => {
     } catch (error) {
         console.error('Error deleting event:', error);
         res.status(500).send({ error: 'Failed to delete event' });
+    }
+});
+
+/* =================================
+    EVENT REGISTRATION APIs
+=================================*/
+
+// 1. Check if user can register for event
+app.get('/events/:id/can-register', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        const eventId = req.params.id;
+
+        // Step 1: Find the event
+        const event = await eventCollection.findOne({
+            _id: new ObjectId(eventId)
+        });
+
+        if (!event) {
+            return res.status(404).json({
+                success: false,
+                message: 'Event not found'
+            });
+        }
+
+        // Step 2: Check if user is club member
+        const membership = await membershipCollection.findOne({
+            clubId: event.clubId,
+            userEmail: userEmail,
+            status: 'active'
+        });
+
+        // Step 3: Check if already registered
+        const existingRegistration = await eventRegistrationCollection.findOne({
+            eventId: eventId,
+            userEmail: userEmail,
+            status: 'registered'
+        });
+
+        // Send response
+        res.json({
+            success: true,
+            canRegister: !!membership && !existingRegistration,
+            isClubMember: !!membership,
+            alreadyRegistered: !!existingRegistration,
+            event: {
+                title: event.title,
+                clubId: event.clubId
+            }
+        });
+
+    } catch (error) {
+        console.error('Error checking registration:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
+// 2. Register for event
+app.post('/events/:id/register', async (req, res) => {
+    try {
+        const { userEmail } = req.body;
+        const eventId = req.params.id;
+
+        // Step 1: Find the event
+        const event = await eventCollection.findOne({
+            _id: new ObjectId(eventId)
+        });
+
+        if (!event) {
+            return res.status(404).json({
+                success: false,
+                message: 'Event not found'
+            });
+        }
+
+        // Step 2: Check if user is club member
+        const membership = await membershipCollection.findOne({
+            clubId: event.clubId,
+            userEmail: userEmail,
+            status: 'active'
+        });
+
+        if (!membership) {
+            return res.status(400).json({
+                success: false,
+                message: 'You must be a club member to register for this event'
+            });
+        }
+
+        // Step 3: Check if already registered
+        const existing = await eventRegistrationCollection.findOne({
+            eventId: eventId,
+            userEmail: userEmail,
+            status: 'registered'
+        });
+
+        if (existing) {
+            return res.status(400).json({
+                success: false,
+                message: 'You are already registered for this event'
+            });
+        }
+
+        // Step 4: Create registration
+        const registration = {
+            eventId: eventId,
+            userEmail: userEmail,
+            clubId: event.clubId,
+            status: 'registered',
+            registeredAt: new Date()
+        };
+
+        await eventRegistrationCollection.insertOne(registration);
+
+        // Step 5: Update event attendees count
+        await eventCollection.updateOne(
+            { _id: new ObjectId(eventId) },
+            {
+                $addToSet: { attendees: userEmail },
+                $inc: { currentAttendees: 1 }
+            }
+        );
+
+        res.json({
+            success: true,
+            message: 'Successfully registered for the event!'
+        });
+
+    } catch (error) {
+        console.error('Error registering for event:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Registration failed'
+        });
+    }
+});
+
+// 3. Cancel registration
+app.delete('/events/:id/cancel-registration', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+        const eventId = req.params.id;
+
+        // Remove registration
+        const result = await eventRegistrationCollection.updateOne(
+            {
+                eventId: eventId,
+                userEmail: userEmail,
+                status: 'registered'
+            },
+            {
+                $set: { status: 'cancelled' }
+            }
+        );
+
+        if (result.modifiedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Registration not found'
+            });
+        }
+
+        // Remove from event attendees
+        await eventCollection.updateOne(
+            { _id: new ObjectId(eventId) },
+            {
+                $pull: { attendees: userEmail },
+                $inc: { currentAttendees: -1 }
+            }
+        );
+
+        res.json({
+            success: true,
+            message: 'Registration cancelled successfully'
+        });
+
+    } catch (error) {
+        console.error('Error cancelling registration:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Cancellation failed'
+        });
     }
 });
 
