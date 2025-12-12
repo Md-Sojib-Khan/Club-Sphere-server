@@ -1168,6 +1168,179 @@ app.delete('/events/:id/cancel-registration', async (req, res) => {
     }
 });
 
+/* ===========================================
+    EVENT REGISTRATIONS - MANAGER'S DASHBOARD
+===========================================*/
+
+// 1. GET ALL Registrations for Manager's Clubs
+app.get('/api/manager/events/registrations', async (req, res) => {
+    try {
+        const { managerEmail } = req.query; // URL: /api/manager/events/registrations?managerEmail=sojibff@gmail.com
+
+        if (!managerEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'Manager email is required'
+            });
+        }
+
+        console.log(`📊 Fetching all event registrations for manager: ${managerEmail}`);
+
+        // STEP 1: Find all clubs managed by this user
+        const managedClubs = await clubCollection.find({
+            managerEmail: managerEmail
+        }).toArray();
+
+        if (managedClubs.length === 0) {
+            return res.json({
+                success: true,
+                message: 'You are not a manager of any club',
+                events: [],
+                registrations: []
+            });
+        }
+
+        const managedClubIds = managedClubs.map(club => club._id.toString());
+        console.log(`✅ Managed Clubs: ${managedClubIds.length}`);
+
+        // STEP 2: Find all events in these clubs
+        const events = await eventCollection.find({
+            clubId: { $in: managedClubIds }
+        }).sort({ eventDate: 1 }).toArray();
+
+        console.log(`✅ Total Events in Clubs: ${events.length}`);
+        const eventIds = events.map(event => event._id.toString());
+
+        // STEP 3: Find ALL registrations for these events
+        const allRegistrations = await eventRegistrationCollection
+            .find({
+                eventId: { $in: eventIds }
+            })
+            .sort({ registeredAt: -1 }) // সর্বশেষ রেজিস্ট্রেশন প্রথমে
+            .toArray();
+
+        console.log(`✅ Total Registrations Found: ${allRegistrations.length}`);
+
+        // STEP 4: Enrich data for frontend
+        const enrichedRegistrations = await Promise.all(
+            allRegistrations.map(async (reg) => {
+                // Find the event details for this registration
+                const event = events.find(e => e._id.toString() === reg.eventId);
+                // Find the club details
+                const club = managedClubs.find(c => c._id.toString() === reg.clubId);
+
+                return {
+                    registrationId: reg._id,
+                    userEmail: reg.userEmail,
+                    status: reg.status, // 'registered' or 'cancelled'
+                    registeredAt: reg.registeredAt,
+                    // Event Details
+                    eventId: reg.eventId,
+                    eventTitle: event?.title || 'Event Not Found',
+                    eventDate: event?.eventDate,
+                    eventLocation: event?.location,
+                    // Club Details
+                    clubId: reg.clubId,
+                    clubName: club?.clubName || 'Club Not Found',
+                    clubManager: club?.managerEmail
+                };
+            })
+        );
+
+        // STEP 5: Prepare summary statistics
+        const summary = {
+            totalClubs: managedClubs.length,
+            totalEvents: events.length,
+            totalRegistrations: allRegistrations.length,
+            activeRegistrations: allRegistrations.filter(r => r.status === 'registered').length,
+            cancelledRegistrations: allRegistrations.filter(r => r.status === 'cancelled').length
+        };
+
+        res.json({
+            success: true,
+            summary: summary,
+            managedClubs: managedClubs.map(c => ({ clubName: c.clubName, clubId: c._id })),
+            registrations: enrichedRegistrations
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching manager registrations:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error: ' + error.message
+        });
+    }
+});
+
+// 2. GET Registrations for a SPECIFIC Event (Manager Only)
+app.get('/api/manager/events/:eventId/registrations', async (req, res) => {
+    try {
+        const eventId = req.params.eventId;
+        const { managerEmail } = req.query;
+
+        console.log(`🎯 Fetching registrations for event ${eventId} by manager ${managerEmail}`);
+
+        // STEP 1: Find the event
+        const event = await eventCollection.findOne({
+            _id: new ObjectId(eventId)
+        });
+
+        if (!event) {
+            return res.status(404).json({
+                success: false,
+                message: 'Event not found'
+            });
+        }
+
+        // STEP 2: Find the club and verify manager
+        const club = await clubCollection.findOne({
+            _id: new ObjectId(event.clubId),
+            managerEmail: managerEmail
+        });
+
+        if (!club) {
+            return res.status(403).json({
+                success: false,
+                message: 'You are not the manager of this event\'s club'
+            });
+        }
+
+        // STEP 3: Get registrations for this specific event
+        const registrations = await eventRegistrationCollection
+            .find({
+                eventId: eventId
+            })
+            .sort({ registeredAt: -1 })
+            .toArray();
+
+        // Format as per requirement: userEmail, status, registeredAt
+        const formattedRegistrations = registrations.map(reg => ({
+            userEmail: reg.userEmail,
+            status: reg.status,
+            registeredAt: reg.registeredAt
+        }));
+
+        res.json({
+            success: true,
+            event: {
+                title: event.title,
+                clubName: club.clubName,
+                eventDate: event.eventDate,
+                location: event.location
+            },
+            registrations: formattedRegistrations,
+            count: registrations.length
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching event registrations:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
 
 /* ===========================
         SERVER
