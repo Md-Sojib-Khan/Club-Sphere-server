@@ -1790,6 +1790,115 @@ app.get('/api/user/payments', async (req, res) => {
     }
 });
 
+/* =================================
+    MEMBER DASHBOARD API - FIXED
+=================================*/
+
+// Get member dashboard data - FIXED VERSION
+app.get('/api/member/dashboard', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'User email is required'
+            });
+        }
+
+        console.log('📊 Member dashboard for:', userEmail);
+
+        // Get user's active memberships
+        const memberships = await membershipCollection.find({
+            userEmail: userEmail,
+            status: 'active'
+        }).toArray();
+
+        const joinedClubIds = memberships.map(m => m.clubId);
+        console.log('Joined club IDs:', joinedClubIds);
+
+        // Get user's event registrations
+        const registrations = await eventRegistrationCollection.find({
+            userEmail: userEmail,
+            status: 'registered'
+        }).toArray();
+
+        // DEBUG: Check event data
+        const allEvents = await eventCollection.find({
+            clubId: { $in: joinedClubIds }
+        }).toArray();
+
+        console.log('All events from clubs:', allEvents.length);
+        if (allEvents.length > 0) {
+            console.log('Sample event:', {
+                title: allEvents[0].title,
+                eventDate: allEvents[0].eventDate,
+                type: typeof allEvents[0].eventDate
+            });
+        }
+
+        // FIX: Get upcoming events (Date comparison fix)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Remove time
+        
+        const upcomingEvents = allEvents.filter(event => {
+            if (!event.eventDate) return false;
+            
+            // Convert string date to Date object
+            const eventDate = new Date(event.eventDate);
+            eventDate.setHours(0, 0, 0, 0);
+            
+            // Check if event is today or in future
+            return eventDate >= today;
+        })
+        .sort((a, b) => {
+            // Sort by date
+            const dateA = new Date(a.eventDate);
+            const dateB = new Date(b.eventDate);
+            return dateA - dateB;
+        })
+        .slice(0, 5); // Limit to 5
+
+        console.log('Upcoming events found:', upcomingEvents.length);
+
+        // Add club names to events
+        const eventsWithClubNames = await Promise.all(
+            upcomingEvents.map(async (event) => {
+                const club = await clubCollection.findOne(
+                    { _id: new ObjectId(event.clubId) },
+                    { projection: { clubName: 1 } }
+                );
+                return {
+                    ...event,
+                    clubName: club?.clubName || 'Unknown Club'
+                };
+            })
+        );
+
+        res.json({
+            success: true,
+            userEmail: userEmail,
+            stats: {
+                totalClubs: joinedClubIds.length,
+                totalEvents: registrations.length
+            },
+            upcomingEvents: eventsWithClubNames,
+            debug: { // Remove in production
+                joinedClubIds,
+                allEventsCount: allEvents.length,
+                upcomingEventsCount: upcomingEvents.length
+            }
+        });
+
+    } catch (error) {
+        console.error('Member dashboard error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
 /* ===========================
         SERVER
 ===========================*/
