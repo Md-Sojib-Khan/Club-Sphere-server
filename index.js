@@ -1469,6 +1469,91 @@ app.get('/api/manager/quick-stats', async (req, res) => {
     }
 });
 
+/* =================================
+    ADMIN PAYMENTS - MINIMAL
+=================================*/
+
+// 1. Get all payments for admin
+app.get('/api/admin/payments', async (req, res) => {
+    try {
+        // Get all payments
+        const payments = await paymentCollection
+            .find({})
+            .sort({ createdAt: -1 })
+            .toArray();
+
+        // Get club names
+        const paymentsWithClubNames = [];
+        
+        for (const payment of payments) {
+            let clubName = 'N/A';
+            
+            if (payment.clubId) {
+                const club = await clubCollection.findOne(
+                    { _id: new ObjectId(payment.clubId) },
+                    { projection: { clubName: 1 } }
+                );
+                if (club) {
+                    clubName = club.clubName;
+                }
+            }
+
+            paymentsWithClubNames.push({
+                userEmail: payment.userEmail,
+                amount: payment.amount,
+                type: payment.type,
+                clubName: clubName,
+                date: payment.createdAt
+            });
+        }
+
+        // Calculate total revenue
+        const totalRevenue = payments.reduce((sum, p) => sum + p.amount, 0);
+
+        res.json({
+            success: true,
+            payments: paymentsWithClubNames,
+            totalRevenue: totalRevenue,
+            totalPayments: payments.length
+        });
+
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
+// 2. Get today's revenue only
+app.get('/api/admin/payments/today', async (req, res) => {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        const payments = await paymentCollection.find({
+            status: 'completed',
+            createdAt: { $gte: today }
+        }).toArray();
+
+        const todayRevenue = payments.reduce((sum, p) => sum + p.amount, 0);
+
+        res.json({
+            success: true,
+            todayRevenue: todayRevenue,
+            todayPayments: payments.length
+        });
+
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
 /* ===========================
         SERVER
 ===========================*/
