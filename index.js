@@ -1342,6 +1342,133 @@ app.get('/api/manager/events/:eventId/registrations', async (req, res) => {
 });
 
 
+/* ===========================================
+    MANAGER DASHBOARD SUMMARY APIs
+===========================================*/
+
+// 1. Manager Dashboard Summary - FIXED
+app.get('/api/manager/dashboard', async (req, res) => {
+    try {
+        const { managerEmail } = req.query;
+
+        if (!managerEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'Manager email is required'
+            });
+        }
+
+        // STEP 1: Get clubs where user is MANAGER (created the club)
+        const managedClubs = await clubCollection.find({
+            managerEmail: managerEmail
+        }).toArray();
+
+        const managedClubIds = managedClubs.map(club => club._id.toString());
+
+        // STEP 2: Basic stats
+        const summary = {
+            clubsManaged: managedClubIds.length,
+            totalMembers: 0,
+            totalEvents: 0,
+            totalPayments: 0
+        };
+
+        if (managedClubIds.length === 0) {
+            return res.json({ success: true, summary: summary });
+        }
+
+        // STEP 3: Get stats for MANAGER'S OWN CLUBS only
+        summary.totalMembers = await membershipCollection.countDocuments({
+            clubId: { $in: managedClubIds },
+            status: 'active'
+        });
+
+        summary.totalEvents = await eventCollection.countDocuments({
+            clubId: { $in: managedClubIds }
+        });
+
+        // STEP 4: FIXED - Get payments only from manager's own clubs
+        const payments = await paymentCollection.find({
+            clubId: { $in: managedClubIds },
+            status: 'completed'
+        }).toArray();
+
+        // Manual sum
+        summary.totalPayments = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+        // STEP 5: Add club status info
+        summary.activeClubs = managedClubs.filter(c => 
+            c.status === 'active' || c.status === 'approved'
+        ).length;
+        
+        summary.pendingClubs = managedClubs.filter(c => 
+            c.status === 'pending'
+        ).length;
+
+        res.json({
+            success: true,
+            summary: summary
+        });
+
+    } catch (error) {
+        console.error('Dashboard error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
+// 2. Quick Stats - SIMPLIFIED
+app.get('/api/manager/quick-stats', async (req, res) => {
+    try {
+        const { managerEmail } = req.query;
+        if (!managerEmail) return res.status(400).json({ 
+            success: false, 
+            message: 'Manager email required' 
+        });
+
+        // Get manager's clubs
+        const managedClubs = await clubCollection.find({
+            managerEmail: managerEmail
+        }).toArray();
+
+        const managedClubIds = managedClubs.map(c => c._id.toString());
+
+        // Quick calculations
+        const stats = {
+            clubsManaged: managedClubIds.length,
+            totalMembers: 0,
+            totalEvents: 0,
+            totalPayments: 0
+        };
+
+        if (managedClubIds.length === 0) {
+            return res.json({ success: true, ...stats });
+        }
+
+        // Get payments from manager's clubs
+        const payments = await paymentCollection.find({
+            clubId: { $in: managedClubIds },
+            status: 'completed'
+        }).toArray();
+
+        stats.totalPayments = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        stats.totalMembers = await membershipCollection.countDocuments({
+            clubId: { $in: managedClubIds },
+            status: 'active'
+        });
+        stats.totalEvents = await eventCollection.countDocuments({
+            clubId: { $in: managedClubIds }
+        });
+
+        res.json({ success: true, ...stats });
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 /* ===========================
         SERVER
 ===========================*/
