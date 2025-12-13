@@ -1554,6 +1554,169 @@ app.get('/api/admin/payments/today', async (req, res) => {
     }
 });
 
+/* =================================
+    ADMIN DASHBOARD SUMMARY API
+=================================*/
+
+// Admin Dashboard Summary
+app.get('/api/admin/dashboard', async (req, res) => {
+    try {
+        // Parallel queries for all data
+        const [
+            totalUsers,
+            totalClubs,
+            pendingClubs,
+            approvedClubs,
+            rejectedClubs,
+            totalMemberships,
+            totalEvents,
+            totalPayments,
+            clubsWithMembers
+        ] = await Promise.all([
+            // Total users
+            userCollection.countDocuments({}),
+            
+            // Total clubs
+            clubCollection.countDocuments({}),
+            
+            // Pending clubs
+            clubCollection.countDocuments({ status: 'pending' }),
+            
+            // Approved clubs
+            clubCollection.countDocuments({ status: 'approved' }),
+            
+            // Rejected clubs
+            clubCollection.countDocuments({ status: 'rejected' }),
+            
+            // Total memberships
+            membershipCollection.countDocuments({}),
+            
+            // Total events
+            eventCollection.countDocuments({}),
+            
+            // Total payments amount
+            paymentCollection.aggregate([
+                { $match: { status: 'completed' } },
+                { $group: { _id: null, total: { $sum: "$amount" } } }
+            ]).toArray(),
+            
+            // Memberships per club (for chart)
+            clubCollection.aggregate([
+                {
+                    $lookup: {
+                        from: "memberships",
+                        localField: "_id",
+                        foreignField: "clubId",
+                        as: "members"
+                    }
+                },
+                {
+                    $project: {
+                        clubName: 1,
+                        memberCount: { $size: "$members" }
+                    }
+                },
+                { $sort: { memberCount: -1 } },
+                { $limit: 10 }
+            ]).toArray()
+        ]);
+
+        const paymentsAmount = totalPayments[0]?.total || 0;
+
+        // Prepare chart data
+        const chartData = {
+            labels: clubsWithMembers.map(c => c.clubName),
+            data: clubsWithMembers.map(c => c.memberCount)
+        };
+
+        res.json({
+            success: true,
+            summary: {
+                totalUsers,
+                totalClubs,
+                pendingClubs,
+                approvedClubs,
+                rejectedClubs,
+                totalMemberships,
+                totalEvents,
+                totalPayments: paymentsAmount
+            },
+            chartData
+        });
+
+    } catch (error) {
+        console.error('Admin dashboard error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
+/* =================================
+    MEMBER EVENTS API
+=================================*/
+
+// Get user's registered events
+app.get('/api/member/events', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'User email is required'
+            });
+        }
+
+        // Find user's event registrations
+        const registrations = await eventRegistrationCollection
+            .find({ 
+                userEmail: userEmail,
+                status: 'registered' // শুধু registered events
+            })
+            .sort({ registeredAt: -1 })
+            .toArray();
+
+        // Get event details for each registration
+        const eventsWithDetails = await Promise.all(
+            registrations.map(async (reg) => {
+                const event = await eventCollection.findOne({
+                    _id: new ObjectId(reg.eventId)
+                });
+
+                const club = await clubCollection.findOne({
+                    _id: new ObjectId(reg.clubId)
+                });
+
+                return {
+                    registrationId: reg._id,
+                    eventId: reg.eventId,
+                    eventTitle: event?.title || 'Event not found',
+                    clubName: club?.clubName || 'Club not found',
+                    eventDate: event?.eventDate || reg.registeredAt,
+                    status: reg.status,
+                    registeredAt: reg.registeredAt,
+                    location: event?.location || 'N/A'
+                };
+            })
+        );
+
+        res.json({
+            success: true,
+            events: eventsWithDetails,
+            total: eventsWithDetails.length
+        });
+
+    } catch (error) {
+        console.error('Error fetching member events:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
 /* ===========================
         SERVER
 ===========================*/
