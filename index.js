@@ -1717,6 +1717,79 @@ app.get('/api/member/events', async (req, res) => {
     }
 });
 
+/* =================================
+    USER PAYMENTS HISTORY API
+=================================*/
+
+// Get user's payment history
+app.get('/api/user/payments', async (req, res) => {
+    try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+            return res.status(400).json({
+                success: false,
+                message: 'User email is required'
+            });
+        }
+
+        // Find user's payments
+        const payments = await paymentCollection
+            .find({ 
+                userEmail: userEmail 
+            })
+            .sort({ createdAt: -1 }) // নতুন payment প্রথমে
+            .toArray();
+
+        // Add club names to payments
+        const paymentsWithDetails = await Promise.all(
+            payments.map(async (payment) => {
+                let clubName = 'N/A';
+                
+                if (payment.clubId) {
+                    const club = await clubCollection.findOne(
+                        { _id: new ObjectId(payment.clubId) },
+                        { projection: { clubName: 1 } }
+                    );
+                    if (club) {
+                        clubName = club.clubName;
+                    }
+                }
+
+                return {
+                    _id: payment._id,
+                    amount: payment.amount,
+                    type: payment.type || 'membership',
+                    clubName: clubName,
+                    date: payment.createdAt || payment.paidAt,
+                    status: payment.status || 'completed',
+                    transactionId: payment.stripePaymentIntentId
+                };
+            })
+        );
+
+        // Calculate totals
+        const totalAmount = payments.reduce((sum, p) => sum + p.amount, 0);
+        const totalPayments = payments.length;
+
+        res.json({
+            success: true,
+            payments: paymentsWithDetails,
+            summary: {
+                totalAmount: totalAmount,
+                totalPayments: totalPayments
+            }
+        });
+
+    } catch (error) {
+        console.error('Error fetching user payments:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+});
+
 /* ===========================
         SERVER
 ===========================*/
