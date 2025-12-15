@@ -3,16 +3,45 @@ const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+var admin = require("firebase-admin");
+const port = process.env.PORT || 3000;
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const port = process.env.PORT || 3000;
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
+
+const verifyFBToken = async (req, res, next) => {
+    const token = req.headers.authorization;
+
+    if (!token) {
+        return res.status(401).send({ message: 'unauthorized access' })
+    }
+
+    try {
+        const idToken = token.split(' ')[1];
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        console.log('decoded in the token', decoded);
+        req.decoded_email = decoded.email;
+        next();
+    }
+    catch (err) {
+        return res.status(401).send({ message: 'unauthorized access' })
+    }
+
+
+}
 
 // MongoDB connection
-const uri = "mongodb+srv://007shojibkhan5:007shojibkhan5@cluster1.mhhrtuq.mongodb.net/?appName=Cluster1";
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster1.mhhrtuq.mongodb.net/?appName=Cluster1`;
 const client = new MongoClient(uri, {
     serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
 });
@@ -22,7 +51,7 @@ let userCollection, clubCollection, eventCollection, paymentCollection, membersh
 
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
         const db = client.db('club_sphere');
 
         // Collections initialize করছি
@@ -71,7 +100,7 @@ run().catch(console.error);
 ===========================*/
 
 // Get Users + Search
-app.get('/users', async (req, res) => {
+app.get('/users', verifyFBToken, async (req, res) => {
     try {
         const search = req.query.searchText;
         const query = search
@@ -137,7 +166,7 @@ app.patch('/users/:uid', async (req, res) => {
         console.log('Updating user:', { uid, displayName, photoURL, email });
 
         // First check if user exists in your database by email OR uid
-        let user = await userCollection.findOne({ 
+        let user = await userCollection.findOne({
             $or: [
                 { uid: uid },
                 { email: email }
@@ -148,15 +177,15 @@ app.patch('/users/:uid', async (req, res) => {
             // Update existing user
             const result = await userCollection.updateOne(
                 { _id: user._id },
-                { 
-                    $set: { 
+                {
+                    $set: {
                         displayName,
                         photoURL: photoURL || user.photoURL,
                         updatedAt: new Date()
                     }
                 }
             );
-            
+
             console.log('User updated:', result);
             res.send({
                 success: true,
@@ -166,10 +195,10 @@ app.patch('/users/:uid', async (req, res) => {
         } else {
             // User not found in database - create new entry
             console.log('User not found in DB, creating new...');
-            
+
             // Get email from Firebase user if not provided
             const userEmail = email || '';
-            
+
             const newUser = {
                 uid,
                 email: userEmail,
@@ -179,10 +208,10 @@ app.patch('/users/:uid', async (req, res) => {
                 createdAt: new Date(),
                 updatedAt: new Date()
             };
-            
+
             const result = await userCollection.insertOne(newUser);
             console.log('New user created:', result);
-            
+
             res.send({
                 success: true,
                 message: 'Profile created successfully',
@@ -191,7 +220,7 @@ app.patch('/users/:uid', async (req, res) => {
         }
     } catch (error) {
         console.error('Error updating user:', error);
-        res.status(500).send({ 
+        res.status(500).send({
             success: false,
             error: 'Failed to update user profile'
         });
@@ -202,16 +231,16 @@ app.patch('/users/:uid', async (req, res) => {
 app.get('/users/get/:identifier', async (req, res) => {
     try {
         const { identifier } = req.params;
-        
+
         // Check if identifier is email or UID
         const isEmail = identifier.includes('@');
-        
-        const query = isEmail 
+
+        const query = isEmail
             ? { email: identifier }
             : { uid: identifier };
-        
+
         const user = await userCollection.findOne(query);
-        
+
         if (user) {
             res.send({
                 success: true,
@@ -462,8 +491,8 @@ app.get('/clubs/:clubId/members', async (req, res) => {
         const { status } = req.query;
 
         // First verify the club exists
-        const club = await clubCollection.findOne({ 
-            _id: new ObjectId(clubId) 
+        const club = await clubCollection.findOne({
+            _id: new ObjectId(clubId)
         });
 
         if (!club) {
@@ -485,13 +514,13 @@ app.get('/clubs/:clubId/members', async (req, res) => {
         // Get user details for each member
         const membersWithDetails = await Promise.all(
             memberships.map(async (membership) => {
-                const user = await userCollection.findOne({ 
-                    email: membership.userEmail 
+                const user = await userCollection.findOne({
+                    email: membership.userEmail
                 }, {
-                    projection: { 
-                        displayName: 1, 
-                        email: 1, 
-                        photoURL: 1 
+                    projection: {
+                        displayName: 1,
+                        email: 1,
+                        photoURL: 1
                     }
                 });
 
@@ -557,11 +586,11 @@ app.patch('/clubs/:clubId/members/:memberId/status', async (req, res) => {
         // Update the status
         const result = await membershipCollection.updateOne(
             { _id: new ObjectId(memberId) },
-            { 
-                $set: { 
+            {
+                $set: {
                     status: status,
                     updatedAt: new Date()
-                } 
+                }
             }
         );
 
@@ -620,12 +649,12 @@ app.delete('/clubs/:clubId/members/:memberId', async (req, res) => {
         // Update club members count
         await clubCollection.updateOne(
             { _id: new ObjectId(clubId) },
-            { 
+            {
                 $inc: { totalMembers: -1 },
-                $pull: { 
-                    members: { 
-                        userEmail: membership.userEmail 
-                    } 
+                $pull: {
+                    members: {
+                        userEmail: membership.userEmail
+                    }
                 },
                 $set: { updatedAt: new Date() }
             }
@@ -652,15 +681,19 @@ app.get('/clubs/:clubId/members-stats', async (req, res) => {
 
         const stats = await membershipCollection.aggregate([
             { $match: { clubId: clubId } },
-            { $group: {
-                _id: '$status',
-                count: { $sum: 1 }
-            }},
-            { $project: {
-                status: '$_id',
-                count: 1,
-                _id: 0
-            }}
+            {
+                $group: {
+                    _id: '$status',
+                    count: { $sum: 1 }
+                }
+            },
+            {
+                $project: {
+                    status: '$_id',
+                    count: 1,
+                    _id: 0
+                }
+            }
         ]).toArray();
 
         const totalMembers = stats.reduce((sum, item) => sum + item.count, 0);
@@ -701,7 +734,6 @@ app.get('/clubs-stats', async (req, res) => {
     }
 });
 
-// Create Stripe Checkout Session
 
 // Create Stripe Checkout Session
 app.post('/create-checkout-session', async (req, res) => {
@@ -855,7 +887,7 @@ app.get('/memberships/check', async (req, res) => {
 });
 
 // Get user's memberships
-app.get('/memberships/user/:email', async (req, res) => {
+app.get('/memberships/user/:email', verifyFBToken, async (req, res) => {
     try {
         const memberships = await membershipCollection.find({
             userEmail: req.params.email
@@ -1277,7 +1309,7 @@ app.delete('/events/:id/cancel-registration', async (req, res) => {
 ===========================================*/
 
 // 1. GET ALL Registrations for Manager's Clubs
-app.get('/api/manager/events/registrations', async (req, res) => {
+app.get('/api/manager/events/registrations', verifyFBToken, async (req, res) => {
     try {
         const { managerEmail } = req.query; // URL: /api/manager/events/registrations?managerEmail=sojibff@gmail.com
 
@@ -1451,7 +1483,7 @@ app.get('/api/manager/events/:eventId/registrations', async (req, res) => {
 ===========================================*/
 
 // 1. Manager Dashboard Summary - FIXED
-app.get('/api/manager/dashboard', async (req, res) => {
+app.get('/api/manager/dashboard', verifyFBToken, async (req, res) => {
     try {
         const { managerEmail } = req.query;
 
@@ -1501,11 +1533,11 @@ app.get('/api/manager/dashboard', async (req, res) => {
         summary.totalPayments = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
         // STEP 5: Add club status info
-        summary.activeClubs = managedClubs.filter(c => 
+        summary.activeClubs = managedClubs.filter(c =>
             c.status === 'active' || c.status === 'approved'
         ).length;
-        
-        summary.pendingClubs = managedClubs.filter(c => 
+
+        summary.pendingClubs = managedClubs.filter(c =>
             c.status === 'pending'
         ).length;
 
@@ -1527,9 +1559,9 @@ app.get('/api/manager/dashboard', async (req, res) => {
 app.get('/api/manager/quick-stats', async (req, res) => {
     try {
         const { managerEmail } = req.query;
-        if (!managerEmail) return res.status(400).json({ 
-            success: false, 
-            message: 'Manager email required' 
+        if (!managerEmail) return res.status(400).json({
+            success: false,
+            message: 'Manager email required'
         });
 
         // Get manager's clubs
@@ -1578,7 +1610,7 @@ app.get('/api/manager/quick-stats', async (req, res) => {
 =================================*/
 
 // 1. Get all payments for admin
-app.get('/api/admin/payments', async (req, res) => {
+app.get('/api/admin/payments', verifyFBToken, async (req, res) => {
     try {
         // Get all payments
         const payments = await paymentCollection
@@ -1588,10 +1620,10 @@ app.get('/api/admin/payments', async (req, res) => {
 
         // Get club names
         const paymentsWithClubNames = [];
-        
+
         for (const payment of payments) {
             let clubName = 'N/A';
-            
+
             if (payment.clubId) {
                 const club = await clubCollection.findOne(
                     { _id: new ObjectId(payment.clubId) },
@@ -1631,11 +1663,11 @@ app.get('/api/admin/payments', async (req, res) => {
 });
 
 // 2. Get today's revenue only
-app.get('/api/admin/payments/today', async (req, res) => {
+app.get('/api/admin/payments/today', verifyFBToken, async (req, res) => {
     try {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        
+
         const payments = await paymentCollection.find({
             status: 'completed',
             createdAt: { $gte: today }
@@ -1663,7 +1695,7 @@ app.get('/api/admin/payments/today', async (req, res) => {
 =================================*/
 
 // Admin Dashboard Summary
-app.get('/api/admin/dashboard', async (req, res) => {
+app.get('/api/admin/dashboard', verifyFBToken, async (req, res) => {
     try {
         // Parallel queries for all data
         const [
@@ -1679,31 +1711,31 @@ app.get('/api/admin/dashboard', async (req, res) => {
         ] = await Promise.all([
             // Total users
             userCollection.countDocuments({}),
-            
+
             // Total clubs
             clubCollection.countDocuments({}),
-            
+
             // Pending clubs
             clubCollection.countDocuments({ status: 'pending' }),
-            
+
             // Approved clubs
             clubCollection.countDocuments({ status: 'approved' }),
-            
+
             // Rejected clubs
             clubCollection.countDocuments({ status: 'rejected' }),
-            
+
             // Total memberships
             membershipCollection.countDocuments({}),
-            
+
             // Total events
             eventCollection.countDocuments({}),
-            
+
             // Total payments amount
             paymentCollection.aggregate([
                 { $match: { status: 'completed' } },
                 { $group: { _id: null, total: { $sum: "$amount" } } }
             ]).toArray(),
-            
+
             // Memberships per club (for chart)
             clubCollection.aggregate([
                 {
@@ -1762,7 +1794,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
 =================================*/
 
 // Get user's registered events
-app.get('/api/member/events', async (req, res) => {
+app.get('/api/member/events', verifyFBToken, async (req, res) => {
     try {
         const { userEmail } = req.query;
 
@@ -1775,7 +1807,7 @@ app.get('/api/member/events', async (req, res) => {
 
         // Find user's event registrations
         const registrations = await eventRegistrationCollection
-            .find({ 
+            .find({
                 userEmail: userEmail,
                 status: 'registered' // শুধু registered events
             })
@@ -1826,7 +1858,7 @@ app.get('/api/member/events', async (req, res) => {
 =================================*/
 
 // Get user's payment history
-app.get('/api/user/payments', async (req, res) => {
+app.get('/api/user/payments', verifyFBToken, async (req, res) => {
     try {
         const { userEmail } = req.query;
 
@@ -1839,8 +1871,8 @@ app.get('/api/user/payments', async (req, res) => {
 
         // Find user's payments
         const payments = await paymentCollection
-            .find({ 
-                userEmail: userEmail 
+            .find({
+                userEmail: userEmail
             })
             .sort({ createdAt: -1 }) // নতুন payment প্রথমে
             .toArray();
@@ -1849,7 +1881,7 @@ app.get('/api/user/payments', async (req, res) => {
         const paymentsWithDetails = await Promise.all(
             payments.map(async (payment) => {
                 let clubName = 'N/A';
-                
+
                 if (payment.clubId) {
                     const club = await clubCollection.findOne(
                         { _id: new ObjectId(payment.clubId) },
@@ -1899,7 +1931,7 @@ app.get('/api/user/payments', async (req, res) => {
 =================================*/
 
 // Get member dashboard data - FIXED VERSION
-app.get('/api/member/dashboard', async (req, res) => {
+app.get('/api/member/dashboard', verifyFBToken, async (req, res) => {
     try {
         const { userEmail } = req.query;
 
@@ -1944,24 +1976,24 @@ app.get('/api/member/dashboard', async (req, res) => {
         // FIX: Get upcoming events (Date comparison fix)
         const today = new Date();
         today.setHours(0, 0, 0, 0); // Remove time
-        
+
         const upcomingEvents = allEvents.filter(event => {
             if (!event.eventDate) return false;
-            
+
             // Convert string date to Date object
             const eventDate = new Date(event.eventDate);
             eventDate.setHours(0, 0, 0, 0);
-            
+
             // Check if event is today or in future
             return eventDate >= today;
         })
-        .sort((a, b) => {
-            // Sort by date
-            const dateA = new Date(a.eventDate);
-            const dateB = new Date(b.eventDate);
-            return dateA - dateB;
-        })
-        .slice(0, 5); // Limit to 5
+            .sort((a, b) => {
+                // Sort by date
+                const dateA = new Date(a.eventDate);
+                const dateB = new Date(b.eventDate);
+                return dateA - dateB;
+            })
+            .slice(0, 5); // Limit to 5
 
         console.log('Upcoming events found:', upcomingEvents.length);
 
