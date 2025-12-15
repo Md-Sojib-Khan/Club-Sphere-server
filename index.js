@@ -128,6 +128,110 @@ app.patch('/users/:id/role', async (req, res) => {
     }
 });
 
+// users.js - PATCH route FIXED VERSION
+app.patch('/users/:uid', async (req, res) => {
+    try {
+        const { uid } = req.params;
+        const { displayName, photoURL, email } = req.body;
+
+        console.log('Updating user:', { uid, displayName, photoURL, email });
+
+        // First check if user exists in your database by email OR uid
+        let user = await userCollection.findOne({ 
+            $or: [
+                { uid: uid },
+                { email: email }
+            ]
+        });
+
+        if (user) {
+            // Update existing user
+            const result = await userCollection.updateOne(
+                { _id: user._id },
+                { 
+                    $set: { 
+                        displayName,
+                        photoURL: photoURL || user.photoURL,
+                        updatedAt: new Date()
+                    }
+                }
+            );
+            
+            console.log('User updated:', result);
+            res.send({
+                success: true,
+                message: 'Profile updated successfully',
+                result
+            });
+        } else {
+            // User not found in database - create new entry
+            console.log('User not found in DB, creating new...');
+            
+            // Get email from Firebase user if not provided
+            const userEmail = email || '';
+            
+            const newUser = {
+                uid,
+                email: userEmail,
+                displayName,
+                photoURL,
+                role: 'member',
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+            
+            const result = await userCollection.insertOne(newUser);
+            console.log('New user created:', result);
+            
+            res.send({
+                success: true,
+                message: 'Profile created successfully',
+                result
+            });
+        }
+    } catch (error) {
+        console.error('Error updating user:', error);
+        res.status(500).send({ 
+            success: false,
+            error: 'Failed to update user profile'
+        });
+    }
+});
+
+// আরেকটি important API: Get user by UID or email
+app.get('/users/get/:identifier', async (req, res) => {
+    try {
+        const { identifier } = req.params;
+        
+        // Check if identifier is email or UID
+        const isEmail = identifier.includes('@');
+        
+        const query = isEmail 
+            ? { email: identifier }
+            : { uid: identifier };
+        
+        const user = await userCollection.findOne(query);
+        
+        if (user) {
+            res.send({
+                success: true,
+                user
+            });
+        } else {
+            res.send({
+                success: false,
+                message: 'User not found'
+            });
+        }
+    } catch (error) {
+        console.error('Error fetching user:', error);
+        res.status(500).send({
+            success: false,
+            error: 'Failed to fetch user'
+        });
+    }
+});
+
 
 /* ===========================
         CLUBS APIs
